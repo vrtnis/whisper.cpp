@@ -102,8 +102,10 @@ endif()
 
 add_library(whisper
             ../include/whisper.h
+            ../include/place_correction.h
             whisper-arch.h
             whisper.cpp
+            place_correction.cpp
             )
 
 # Set the version numbers
@@ -123,7 +125,7 @@ if (WHISPER_EXTRA_FLAGS)
     target_compile_options(whisper PRIVATE ${WHISPER_EXTRA_FLAGS})
 endif()
 
-target_link_libraries(whisper PUBLIC ggml)
+target_link_libraries(whisper PUBLIC ggml doublemetaphone)
 
 if (WHISPER_COREML)
     target_link_libraries(whisper PRIVATE whisper.coreml)
