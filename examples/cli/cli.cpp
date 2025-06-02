@@ -3,6 +3,7 @@
 
 #include "whisper.h"
 #include "grammar-parser.h"
+#include "place_correction.h"
 
 #include <cmath>
 #include <fstream>
@@ -94,6 +95,9 @@ struct whisper_params {
     std::string openvino_encode_device = "CPU";
 
     std::string dtw = "";
+
+    bool correct_places = false;
+    std::string place_names = "resources/place_names.txt";
 
     std::vector<std::string> fname_inp = {};
     std::vector<std::string> fname_out = {};
@@ -198,6 +202,8 @@ static bool whisper_params_parse(int argc, char ** argv, whisper_params & params
         else if (                  arg == "--grammar")         { params.grammar         = ARGV_NEXT; }
         else if (                  arg == "--grammar-rule")    { params.grammar_rule    = ARGV_NEXT; }
         else if (                  arg == "--grammar-penalty") { params.grammar_penalty = std::stof(ARGV_NEXT); }
+        else if (                  arg == "--correct-places")  { params.correct_places = true; }
+        else if (                  arg == "--place-names")    { params.place_names = ARGV_NEXT; }
         // Voice Activity Detection (VAD)
         else if (                  arg == "--vad")                         { params.vad                         = true; }
         else if (arg == "-vm"   || arg == "--vad-model")                   { params.vad_model                   = ARGV_NEXT; }
@@ -277,6 +283,8 @@ static void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params
     fprintf(stderr, "  --grammar GRAMMAR              [%-7s] GBNF grammar to guide decoding\n",                 params.grammar.c_str());
     fprintf(stderr, "  --grammar-rule RULE            [%-7s] top-level GBNF grammar rule name\n",               params.grammar_rule.c_str());
     fprintf(stderr, "  --grammar-penalty N            [%-7.1f] scales down logits of nongrammar tokens\n",      params.grammar_penalty);
+    fprintf(stderr, "  --correct-places               [%-7s] enable place name correction\n", params.correct_places ? "true" : "false");
+    fprintf(stderr, "  --place-names FNAME            [%-7s] glossary file for place correction\n", params.place_names.c_str());
     // Voice Activity Detection (VAD) parameters
     fprintf(stderr, "\nVoice Activity Detection (VAD) options:\n");
     fprintf(stderr, "             --vad                           [%-7s] enable Voice Activity Detection (VAD)\n",            params.vad ? "true" : "false");
@@ -410,9 +418,9 @@ static void whisper_print_segment_callback(struct whisper_context * ctx, struct 
                 printf("%s%s%s%s", speaker.c_str(), k_styles[style_idx].c_str(), text, "\033[0m");
             }
         } else {
-            const char * text = whisper_full_get_segment_text(ctx, i);
-
-            printf("%s%s", speaker.c_str(), text);
+            std::string text = whisper_full_get_segment_text(ctx, i);
+            if (params.correct_places) text = correct_place_names(text);
+            printf("%s%s", speaker.c_str(), text.c_str());
         }
 
         if (params.tinydiarize) {
@@ -433,7 +441,8 @@ static void whisper_print_segment_callback(struct whisper_context * ctx, struct 
 static void output_txt(struct whisper_context * ctx, std::ofstream & fout, const whisper_params & params, std::vector<std::vector<float>> pcmf32s) {
     const int n_segments = whisper_full_n_segments(ctx);
     for (int i = 0; i < n_segments; ++i) {
-        const char * text = whisper_full_get_segment_text(ctx, i);
+        std::string text = whisper_full_get_segment_text(ctx, i);
+        if (params.correct_places) text = correct_place_names(text);
         std::string speaker = "";
 
         if (params.diarize && pcmf32s.size() == 2)
@@ -452,7 +461,8 @@ static void output_vtt(struct whisper_context * ctx, std::ofstream & fout, const
 
     const int n_segments = whisper_full_n_segments(ctx);
     for (int i = 0; i < n_segments; ++i) {
-        const char * text = whisper_full_get_segment_text(ctx, i);
+        std::string text = whisper_full_get_segment_text(ctx, i);
+        if (params.correct_places) text = correct_place_names(text);
         const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
         const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
         std::string speaker = "";
@@ -472,7 +482,8 @@ static void output_vtt(struct whisper_context * ctx, std::ofstream & fout, const
 static void output_srt(struct whisper_context * ctx, std::ofstream & fout, const whisper_params & params, std::vector<std::vector<float>> pcmf32s) {
     const int n_segments = whisper_full_n_segments(ctx);
     for (int i = 0; i < n_segments; ++i) {
-        const char * text = whisper_full_get_segment_text(ctx, i);
+        std::string text = whisper_full_get_segment_text(ctx, i);
+        if (params.correct_places) text = correct_place_names(text);
         const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
         const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
         std::string speaker = "";
@@ -561,10 +572,11 @@ static void output_csv(struct whisper_context * ctx, std::ofstream & fout, const
     fout << "text\n";
 
     for (int i = 0; i < n_segments; ++i) {
-        const char * text = whisper_full_get_segment_text(ctx, i);
+        std::string text = whisper_full_get_segment_text(ctx, i);
+        if (params.correct_places) text = correct_place_names(text);
         const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
         const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
-        char * text_escaped = escape_double_quotes_in_csv(text);
+        char * text_escaped = escape_double_quotes_in_csv(text.c_str());
 
         //need to multiply times returned from whisper_full_get_segment_t{0,1}() by 10 to get milliseconds.
         fout << 10 * t0 << "," << 10 * t1 << ",";
@@ -709,14 +721,15 @@ static void output_json(
 
             const int n_segments = whisper_full_n_segments(ctx);
             for (int i = 0; i < n_segments; ++i) {
-                const char * text = whisper_full_get_segment_text(ctx, i);
+                std::string text = whisper_full_get_segment_text(ctx, i);
+                if (params.correct_places) text = correct_place_names(text);
 
                 const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
                 const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
 
                 start_obj(nullptr);
                     times_o(t0, t1, false);
-                    value_s("text", text, !params.diarize && !params.tinydiarize && !full);
+                    value_s("text", text.c_str(), !params.diarize && !params.tinydiarize && !full);
 
                     if (full) {
                         start_arr("tokens");
@@ -880,7 +893,8 @@ static void output_lrc(struct whisper_context * ctx, std::ofstream & fout, const
 
     const int n_segments = whisper_full_n_segments(ctx);
     for (int i = 0; i < n_segments; ++i) {
-        const char * text = whisper_full_get_segment_text(ctx, i);
+        std::string text = whisper_full_get_segment_text(ctx, i);
+        if (params.correct_places) text = correct_place_names(text);
         const int64_t t = whisper_full_get_segment_t0(ctx, i);
 
         int64_t msec = t * 10;
@@ -1049,6 +1063,16 @@ int main(int argc, char ** argv) {
             grammar_parser::print_grammar(stderr, grammar);
             fprintf(stderr, "\n");
         }
+    }
+
+    if (params.correct_places) {
+        std::ifstream pf(params.place_names);
+        std::vector<std::string> glossary;
+        std::string line;
+        while (std::getline(pf, line)) {
+            if (!line.empty()) glossary.push_back(line);
+        }
+        build_phonetic_index(glossary);
     }
 
     for (int f = 0; f < (int) params.fname_inp.size(); ++f) {

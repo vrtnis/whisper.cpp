@@ -4,6 +4,7 @@
 #include "whisper.h"
 #include "httplib.h"
 #include "json.hpp"
+#include "place_correction.h"
 
 #include <chrono>
 #include <cmath>
@@ -90,6 +91,9 @@ struct whisper_params {
     std::string openvino_encode_device = "CPU";
 
     std::string dtw = "";
+
+    bool correct_places = false;
+    std::string place_names = "resources/place_names.txt";
 };
 
 void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & params, const server_params& sparams) {
@@ -129,6 +133,8 @@ void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & para
     fprintf(stderr, "  -oved D,   --ov-e-device DNAME [%-7s] the OpenVINO device used for encode inference\n",  params.openvino_encode_device.c_str());
     // server params
     fprintf(stderr, "  -dtw MODEL --dtw MODEL         [%-7s] compute token-level timestamps\n", params.dtw.c_str());
+    fprintf(stderr, "  --correct-places               [%-7s] enable place name correction\n", params.correct_places ? "true" : "false");
+    fprintf(stderr, "  --place-names FNAME            [%-7s] glossary file for place correction\n", params.place_names.c_str());
     fprintf(stderr, "  --host HOST,                   [%-7s] Hostname/ip-adress for the server\n", sparams.hostname.c_str());
     fprintf(stderr, "  --port PORT,                   [%-7d] Port number for the server\n", sparams.port);
     fprintf(stderr, "  --public PATH,                 [%-7s] Path to the public folder\n", sparams.public_path.c_str());
@@ -182,6 +188,8 @@ bool whisper_params_parse(int argc, char ** argv, whisper_params & params, serve
         else if (arg == "-m"    || arg == "--model")           { params.model           = argv[++i]; }
         else if (arg == "-oved" || arg == "--ov-e-device")     { params.openvino_encode_device = argv[++i]; }
         else if (arg == "-dtw"  || arg == "--dtw")             { params.dtw             = argv[++i]; }
+        else if (                  arg == "--correct-places")   { params.correct_places = true; }
+        else if (                  arg == "--place-names")     { params.place_names = argv[++i]; }
         else if (arg == "-ng"   || arg == "--no-gpu")          { params.use_gpu         = false; }
         else if (arg == "-fa"   || arg == "--flash-attn")      { params.flash_attn      = true; }
         else if (arg == "-sns"  || arg == "--suppress-nst")    { params.suppress_nst    = true; }
@@ -360,9 +368,9 @@ void whisper_print_segment_callback(struct whisper_context * ctx, struct whisper
                 printf("%s%s%s%s", speaker.c_str(), k_colors[col].c_str(), text, "\033[0m");
             }
         } else {
-            const char * text = whisper_full_get_segment_text(ctx, i);
-
-            printf("%s%s", speaker.c_str(), text);
+            std::string text = whisper_full_get_segment_text(ctx, i);
+            if (params.correct_places) text = correct_place_names(text);
+            printf("%s%s", speaker.c_str(), text.c_str());
         }
 
         if (params.tinydiarize) {
@@ -383,7 +391,8 @@ std::string output_str(struct whisper_context * ctx, const whisper_params & para
     std::stringstream result;
     const int n_segments = whisper_full_n_segments(ctx);
     for (int i = 0; i < n_segments; ++i) {
-        const char * text = whisper_full_get_segment_text(ctx, i);
+        std::string text = whisper_full_get_segment_text(ctx, i);
+        if (params.correct_places) text = correct_place_names(text);
         std::string speaker = "";
 
         if (params.diarize && pcmf32s.size() == 2)
@@ -602,6 +611,16 @@ int main(int argc, char ** argv) {
 
     // initialize openvino encoder. this has no effect on whisper.cpp builds that don't have OpenVINO configured
     whisper_ctx_init_openvino_encoder(ctx, nullptr, params.openvino_encode_device.c_str(), nullptr);
+
+    if (params.correct_places) {
+        std::ifstream pf(params.place_names);
+        std::vector<std::string> glossary;
+        std::string line;
+        while (std::getline(pf, line)) {
+            if (!line.empty()) glossary.push_back(line);
+        }
+        build_phonetic_index(glossary);
+    }
 
     Server svr;
     svr.set_default_headers({{"Server", "whisper.cpp"},
@@ -878,7 +897,8 @@ int main(int argc, char ** argv) {
             std::stringstream ss;
             const int n_segments = whisper_full_n_segments(ctx);
             for (int i = 0; i < n_segments; ++i) {
-                const char * text = whisper_full_get_segment_text(ctx, i);
+                std::string text = whisper_full_get_segment_text(ctx, i);
+                if (params.correct_places) text = correct_place_names(text);
                 const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
                 const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
                 std::string speaker = "";
@@ -900,7 +920,8 @@ int main(int argc, char ** argv) {
 
             const int n_segments = whisper_full_n_segments(ctx);
             for (int i = 0; i < n_segments; ++i) {
-                const char * text = whisper_full_get_segment_text(ctx, i);
+                std::string text = whisper_full_get_segment_text(ctx, i);
+                if (params.correct_places) text = correct_place_names(text);
                 const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
                 const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
                 std::string speaker = "";
@@ -941,9 +962,11 @@ int main(int argc, char ** argv) {
             const int n_segments = whisper_full_n_segments(ctx);
             for (int i = 0; i < n_segments; ++i)
             {
+                std::string text = whisper_full_get_segment_text(ctx, i);
+                if (params.correct_places) text = correct_place_names(text);
                 json segment = json{
                     {"id", i},
-                    {"text", whisper_full_get_segment_text(ctx, i)},
+                    {"text", text},
                 };
 
                 if (!params.no_timestamps) {

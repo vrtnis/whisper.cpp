@@ -156,6 +156,7 @@ if (NOT TARGET ggml)
     endif()
     # ... otherwise assume ggml is added by a parent CMakeLists.txt
 endif()
+add_subdirectory(thirdparty/doublemetaphone)
 add_subdirectory(src)
 
 #
